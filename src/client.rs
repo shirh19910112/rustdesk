@@ -31,7 +31,7 @@ use crate::{
     create_symmetric_key_msg, decode_id_pk, decode_id_pk_dtls, dtls_fingerprint_bound, get_rs_pk,
     is_keyboard_mode_supported,
     kcp_stream::KcpStream,
-    secure_tcp, secure_tcp_required,
+    secure_tcp_required,
     ui_interface::{get_builtin_option, resolve_avatar_url, use_texture_render},
     ui_session_interface::{InvokeUiSession, Session},
 };
@@ -76,6 +76,33 @@ use base::{
     message_proto::{option_message::BoolOption, *},
 };
 pub use helper::*;
+const COMPAT_SECURE_TCP_PROBE_TIMEOUT: u64 = 2_000;
+async fn compat_secure_tcp_probe(conn: &mut Stream, key: &str) -> ResultType<()> {
+    timeout(
+        COMPAT_SECURE_TCP_PROBE_TIMEOUT,
+        secure_tcp_required(conn, key),
+    )
+    .await??;
+    Ok(())
+}
+const COMPAT_SECURE_TCP_PROBE_TIMEOUT: u64 = 2_000;
+async fn compat_secure_tcp_probe(conn: &mut Stream, key: &str) -> ResultType<()> {
+    timeout(
+        COMPAT_SECURE_TCP_PROBE_TIMEOUT,
+        secure_tcp_required(conn, key),
+    )
+    .await??;
+    Ok(())
+}
+const COMPAT_SECURE_TCP_PROBE_TIMEOUT: u64 = 2_000;
+async fn compat_secure_tcp_probe(conn: &mut Stream, key: &str) -> ResultType<()> {
+    timeout(
+        COMPAT_SECURE_TCP_PROBE_TIMEOUT,
+        secure_tcp_required(conn, key),
+    )
+    .await??;
+    Ok(())
+}
 use scrap::{
     codec::Decoder,
     record::{Recorder, RecorderContext},
@@ -853,29 +880,41 @@ impl Client {
         // wait rather than replacing it: the test runs beside both.
         let udp_nat_wait_from = Instant::now();
         let mut exchanged = false;
+        let mut compat_secure_unavailable = false;
         if carries_offer {
-            // An offer puts both sides' ICE candidates, every interface address of both
-            // machines, on this socket, so it goes out only once the server's key exchange has
-            // encrypted it. When the server does not complete one, an hbbs from before the
-            // exchange, the offer is dropped and this becomes a punch without WebRTC, on a fresh
-            // socket since the failed exchange may have consumed a message on this one. Degrade
-            // to no WebRTC, never to WebRTC signalling in the clear.
-            match secure_tcp_required(&mut socket, &key).await {
+            // Probe briefly for the new key exchange. Legacy servers may never
+            // send it, so waiting the global READ_TIMEOUT here makes the
+            // compatibility fallback look like the client is hanging.
+            match compat_secure_tcp_probe(&mut socket, &key).await {
                 Ok(()) => exchanged = true,
                 Err(err) => {
                     log::warn!(
-                        "WebRTC signalling to {} cannot be encrypted, punching without WebRTC: {}",
+                        "WebRTC signalling to {} cannot be encrypted within {} ms, punching without WebRTC: {}",
                         rendezvous_server,
+                        COMPAT_SECURE_TCP_PROBE_TIMEOUT,
                         err
                     );
+                    compat_secure_unavailable = true;
                     webrtc_offerer = None;
+                    // Never reuse a socket after a failed or timed-out secure
+                    // probe. A late key-exchange frame could otherwise leak
+                    // into the legacy protocol flow.
                     socket = connect_tcp(&*rendezvous_server, CONNECT_TIMEOUT).await?;
                     my_addr = socket.local_addr();
                 }
             }
         }
-        if !exchanged && legacy_secure {
-            allow_err!(secure_tcp(&mut socket, &key).await);
+        if !exchanged && legacy_secure && !compat_secure_unavailable {
+            if let Err(err) = compat_secure_tcp_probe(&mut socket, &key).await {
+                log::warn!(
+                    "Rendezvous secure-tcp probe failed within {} ms, continuing in compatibility mode: {}",
+                    COMPAT_SECURE_TCP_PROBE_TIMEOUT,
+                    err
+                );
+                // Always start legacy fallback with a clean socket.
+                socket = connect_tcp(&*rendezvous_server, CONNECT_TIMEOUT).await?;
+                my_addr = socket.local_addr();
+            }
         }
         // A token or switch code has always taken this socket straight to the punch without
         // waiting for the UDP NAT test. The WebRTC exchange does not replace that wait, it only
@@ -1786,17 +1825,29 @@ impl Client {
         let mut succeed = false;
         let mut uuid = "".to_owned();
         let mut ipv4 = true;
-
+        let mut compat_secure_unavailable = false;
         for i in 1..=3 {
             // use different socket due to current hbbs implementation requiring different nat address for each attempt
             let mut socket = connect_tcp(rendezvous_server, CONNECT_TIMEOUT)
                 .await
                 .with_context(|| "Failed to connect to rendezvous server")?;
-
-            if !key.is_empty() && (!token.is_empty() || !switch_code.is_empty()) {
-                allow_err!(secure_tcp(&mut socket, key).await);
+            if !compat_secure_unavailable
+                && !key.is_empty()
+                && (!token.is_empty() || !switch_code.is_empty())
+            {
+                if let Err(err) = compat_secure_tcp_probe(&mut socket, key).await {
+                    log::warn!(
+                        "Relay secure-tcp probe failed within {} ms; skip repeated probes for this request: {}",
+                        COMPAT_SECURE_TCP_PROBE_TIMEOUT,
+                        err
+                    );
+                    compat_secure_unavailable = true;
+                    // Never reuse the probe socket for the legacy relay request.
+                    socket = connect_tcp(rendezvous_server, CONNECT_TIMEOUT)
+                        .await
+                        .with_context(|| "Failed to reconnect to rendezvous server")?;
+                }
             }
-
             ipv4 = socket.local_addr().is_ipv4();
             let mut msg_out = RendezvousMessage::new();
             uuid = Uuid::new_v4().to_string();
