@@ -2830,6 +2830,25 @@ Future<void> onActiveWindowChanged() async {
   print(
       "[MultiWindowHandler] active window changed: ${rustDeskWinManager.getActiveWindows()}");
   if (rustDeskWinManager.getActiveWindows().isEmpty) {
+    // On Windows, do not tear down the application because the active-window
+    // bookkeeping set is momentarily empty while the main window is still
+    // visible. This can happen during startup and multi-window hide/show races.
+    if (isWindows && desktopType == DesktopType.main) {
+      try {
+        if (await windowManager.isVisible()) {
+          debugPrint(
+              "[MultiWindowHandler] ignore empty active-window set while main window is visible");
+          await rustDeskWinManager.registerActiveWindow(kWindowMainId);
+          return;
+        }
+      } catch (err) {
+        debugPrint(
+            "[MultiWindowHandler] failed to verify main-window visibility: $err");
+        await rustDeskWinManager.registerActiveWindow(kWindowMainId);
+        return;
+      }
+    }
+
     // close all sub windows
     try {
       if (isLinux) {
