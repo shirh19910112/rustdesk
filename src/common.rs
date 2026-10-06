@@ -1034,7 +1034,7 @@ pub async fn do_check_software_update() -> hbb_common::ResultType<()> {
     // This build keeps the stock RustDesk identity but owns its update channel.
     // Discover versions only from this repository's GitHub Releases.
     let url =
-        "https://api.github.com/repos/shirh19910112/rustdesk-sut/releases/latest".to_string();
+        "https://api.github.com/repos/shirh19910112/rustdesk/releases/latest".to_string();
     let proxy_conf = Config::get_socks();
     let tls_url = get_url_for_tls(&url, &proxy_conf);
     let tls_type = get_cached_tls_type(tls_url);
@@ -1086,7 +1086,7 @@ pub async fn do_check_software_update() -> hbb_common::ResultType<()> {
         .get("html_url")
         .and_then(Value::as_str)
         .filter(|url| !url.is_empty())
-        .unwrap_or("https://github.com/shirh19910112/rustdesk-sut/releases/latest")
+        .unwrap_or("https://github.com/shirh19910112/rustdesk/releases/latest")
         .to_owned();
 
     if get_version_number(latest_release_version) > get_version_number(crate::VERSION) {
