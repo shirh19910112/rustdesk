@@ -141,6 +141,12 @@ void runMainApp(bool startService) async {
   }
   await Future.wait([gFFI.abModel.loadCache(), gFFI.groupModel.loadCache()]);
   gFFI.userModel.refreshCurrentUser();
+
+  // Register the main window before DesktopHomePage installs the active-window
+  // listener. This avoids a startup race where a stale hide/unregister event can
+  // temporarily empty the active-window set and close the whole GUI.
+  await rustDeskWinManager.registerActiveWindow(kWindowMainId);
+
   runApp(App());
 
   bool? alwaysOnTop;
