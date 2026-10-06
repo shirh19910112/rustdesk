@@ -875,9 +875,7 @@ impl Client {
             }
         }
         if !exchanged && legacy_secure {
-            secure_tcp(&mut socket, &key)
-                .await
-                .map_err(|e| anyhow!("Failed to secure tcp: {}", e))?;
+            allow_err!(secure_tcp(&mut socket, &key).await);
         }
         // A token or switch code has always taken this socket straight to the punch without
         // waiting for the UDP NAT test. The WebRTC exchange does not replace that wait, it only
@@ -1796,7 +1794,7 @@ impl Client {
                 .with_context(|| "Failed to connect to rendezvous server")?;
 
             if !key.is_empty() && (!token.is_empty() || !switch_code.is_empty()) {
-                secure_tcp(&mut socket, key).await?;
+                allow_err!(secure_tcp(&mut socket, key).await);
             }
 
             ipv4 = socket.local_addr().is_ipv4();
