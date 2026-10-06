@@ -2,7 +2,7 @@
 on:
   workflow_dispatch:
 permissions:
-  contents: read
+  contents: write
 jobs:
   validate:
     uses: ./.github/workflows/flutter-build.yml
