@@ -2830,23 +2830,37 @@ Future<void> onActiveWindowChanged() async {
   print(
       "[MultiWindowHandler] active window changed: ${rustDeskWinManager.getActiveWindows()}");
   if (rustDeskWinManager.getActiveWindows().isEmpty) {
-    // On Windows, do not tear down the application because the active-window
-    // bookkeeping set is momentarily empty while the main window is still
-    // visible. This can happen during startup and multi-window hide/show races.
+    // On Windows, an empty active-window set is not a reliable application-exit
+    // signal. The main window and remote multi-windows can briefly unregister
+    // while Flutter/desktop_multi_window processes hide/show events. Debounce the
+    // transition and never tear down the GUI solely because this bookkeeping set
+    // is empty; explicit close/exit paths remain responsible for terminating it.
     if (isWindows && desktopType == DesktopType.main) {
+      debugPrint(
+          "[WindowLifecycle] active window set became empty; debounce before recovery");
+      await Future.delayed(const Duration(milliseconds: 300));
+
+      final activeAfterDebounce = rustDeskWinManager.getActiveWindows();
+      if (activeAfterDebounce.isNotEmpty) {
+        debugPrint(
+            "[WindowLifecycle] active windows recovered after debounce: $activeAfterDebounce");
+        return;
+      }
+
       try {
         if (await windowManager.isVisible()) {
           debugPrint(
-              "[MultiWindowHandler] ignore empty active-window set while main window is visible");
+              "[WindowLifecycle] re-register visible main window after transient empty set");
           await rustDeskWinManager.registerActiveWindow(kWindowMainId);
-          return;
+        } else {
+          debugPrint(
+              "[WindowLifecycle] keep Windows GUI alive while main window is hidden");
         }
       } catch (err) {
         debugPrint(
-            "[MultiWindowHandler] failed to verify main-window visibility: $err");
-        await rustDeskWinManager.registerActiveWindow(kWindowMainId);
-        return;
+            "[WindowLifecycle] failed to query main-window visibility; keep GUI alive: $err");
       }
+      return;
     }
 
     // close all sub windows

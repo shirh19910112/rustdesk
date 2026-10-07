@@ -16,6 +16,14 @@ pub const NAME: &'static str = "display";
 
 #[cfg(windows)]
 const DUMMY_DISPLAY_SIDE_MAX_SIZE: usize = 1024;
+#[cfg(windows)]
+const HEADLESS_TRANSIENT_RETRY_COUNT: usize = 4;
+#[cfg(windows)]
+const HEADLESS_TRANSIENT_RETRY_INTERVAL_MS: u64 = 250;
+#[cfg(windows)]
+const HEADLESS_READY_RETRY_COUNT: usize = 25;
+#[cfg(windows)]
+const HEADLESS_READY_RETRY_INTERVAL_MS: u64 = 100;
 
 struct ChangedResolution {
     original: (i32, i32),
@@ -1013,13 +1021,86 @@ pub fn try_get_displays_(add_amyuni_headless: bool) -> ResultType<Vec<Display>> 
     //     return Ok(displays);
     // }
 
-    let no_displays_v = no_displays(&displays);
-    if no_displays_v {
-        log::debug!("no displays, create virtual display");
+    // A Windows login/session switch can briefly report no usable displays even
+    // though a physical monitor is present. Give the real display a short window
+    // to recover before creating a headless monitor.
+    if no_displays(&displays) {
+        log::info!(
+            "no usable displays detected; retrying physical display enumeration before headless fallback"
+        );
+        for attempt in 1..=HEADLESS_TRANSIENT_RETRY_COUNT {
+            std::thread::sleep(std::time::Duration::from_millis(
+                HEADLESS_TRANSIENT_RETRY_INTERVAL_MS,
+            ));
+            match Display::all() {
+                Ok(refreshed) => {
+                    displays = refreshed;
+                    if !no_displays(&displays) {
+                        log::info!(
+                            "physical display recovered during headless debounce, attempt {}/{}",
+                            attempt,
+                            HEADLESS_TRANSIENT_RETRY_COUNT
+                        );
+                        return Ok(displays);
+                    }
+                }
+                Err(e) => {
+                    log::warn!(
+                        "display enumeration failed during headless debounce, attempt {}/{}: {}",
+                        attempt,
+                        HEADLESS_TRANSIENT_RETRY_COUNT,
+                        e
+                    );
+                }
+            }
+        }
+    }
+
+    if no_displays(&displays) {
+        log::info!(
+            "no usable displays after debounce; creating headless virtual display"
+        );
         if let Err(e) = virtual_display_manager::plug_in_headless() {
             log::error!("plug in headless failed {}", e);
         } else {
-            displays = Display::all()?;
+            // IDD attachment is asynchronous on some Windows/session states.
+            // Wait briefly for Display::all() to observe the new monitor instead
+            // of making the connection race a single immediate enumeration.
+            let mut ready = false;
+            for attempt in 1..=HEADLESS_READY_RETRY_COUNT {
+                std::thread::sleep(std::time::Duration::from_millis(
+                    HEADLESS_READY_RETRY_INTERVAL_MS,
+                ));
+                match Display::all() {
+                    Ok(refreshed) => {
+                        displays = refreshed;
+                        if !no_displays(&displays) {
+                            log::info!(
+                                "headless virtual display is ready, attempt {}/{}",
+                                attempt,
+                                HEADLESS_READY_RETRY_COUNT
+                            );
+                            ready = true;
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!(
+                            "display enumeration failed while waiting for headless display, attempt {}/{}: {}",
+                            attempt,
+                            HEADLESS_READY_RETRY_COUNT,
+                            e
+                        );
+                    }
+                }
+            }
+            if !ready {
+                log::error!(
+                    "headless virtual display did not become ready within {} ms",
+                    HEADLESS_READY_RETRY_COUNT
+                        * HEADLESS_READY_RETRY_INTERVAL_MS as usize
+                );
+            }
         }
     }
     Ok(displays)
